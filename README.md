@@ -3,6 +3,8 @@
 __Warning__: This is a proof-of-concept experiment.
 Use on a production system at your own risk!
 
+__Authors__: Ferenc Orosi, Ferenc Fejes
+
 ## Table of contents
 
 - [Objective](#objective)
@@ -426,3 +428,9 @@ sudo rm /sys/fs/bpf/timer_map
 sudo rm /sys/fs/bpf/tsn_map
 sudo rm -r /sys/fs/bpf/minikube/
 ```
+
+## Acknowledgement
+
+This work was supported by the European Union’s Horizon 2020 research and innovation programme through
+DETERMINISTIC6G project under Grant Agreement no.
+101096504
