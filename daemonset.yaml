@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright Ericsson Research
+# SPDX-License-Identifier: BSD-2-Clause
+
+# Manifest of the TSN metadata proxy CNI plugin.
+# The DaemonSet ensure that every component installed on the node
+# e.g.: recent version of bpftool, eBPF prog objects, CNI plugin script
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tsn-config
+  namespace: default
+data:
+  TSN_IFNAME: "eth0"
+  TSN_INGRESS_OR_EGRESS: "egress"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cni-demo
+spec:
+  selector:
+    matchLabels:
+      app: cni-plugins
+  template:
+    metadata:
+      labels:
+        app: cni-plugins
+    spec:
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: bookworm-pod
+        image: debian:bookworm-slim
+        command: ["/bin/sh","-c"]
+        args: ["sleep infinity"]
+      initContainers:
+      - name: tsn-proxy-cni-install
+        image: tsn-metadata-proxy:latest
+        imagePullPolicy: "Never"
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        command:
+        - /bin/sh
+        - -cx
+        - |
+          # Remove existed BPF programs and maps
+          rm -f /sys/fs/bpf/restorer
+          rm -f /sys/fs/bpf/saver
+          rm -f /sys/fs/bpf/tracking
+          rm -f /sys/fs/bpf/${NODE_NAME}/tsn_map
+
+          # Copy required files to the host
+          cp /tsn /host/opt/cni/bin/
+          cp -r /tsn-metadata-proxy /host/opt/cni/bin/
+
+          # Create a directory named after the node for the BPF map
+          mkdir -p /sys/fs/bpf/${NODE_NAME}
+          /host/opt/cni/bin/tsn-metadata-proxy/bpftool map create /sys/fs/bpf/${NODE_NAME}/tsn_map type hash key 8 value 16 entries 2048 name tsn_map
+
+          # Execute the installation script that injects the TSN plugin into the configuration list
+          source /host/opt/cni/bin/tsn-metadata-proxy/install.sh
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: cni-plugin-dir
+          mountPath: /host/opt/cni/bin/
+        - name: cni-config-dir
+          mountPath: /host/etc/cni/net.d/
+        - name: bpf-fs
+          mountPath: /sys/fs/bpf
+        - name: tsn-config
+          mountPath: /etc/config
+      volumes:
+      - name: cni-plugin-dir
+        hostPath:
+          path: /opt/cni/bin/
+      - name: cni-config-dir
+        hostPath:
+          path: /etc/cni/net.d/
+      - name: bpf-fs
+        hostPath:
+          type: DirectoryOrCreate
+          path: /sys/fs/bpf
+      - name: tsn-config
+        configMap:
+          name: tsn-config
+

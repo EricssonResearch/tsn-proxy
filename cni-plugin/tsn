@@ -1,0 +1,118 @@
+#!/bin/bash -e
+
+# SPDX-FileCopyrightText: Copyright Ericsson Research
+# SPDX-License-Identifier: BSD-2-Clause
+
+# The CNI plugin of the TSN metadata proxy, executed by the kubelet
+# It loads the eBPF programs, attach them to the pod interface
+# Do basic logging as well
+
+if [[ ${DEBUG} -gt 0 ]]; then set -x; fi
+
+STDIN="$(cat /dev/stdin)"
+BIN_DIR=/opt/cni/bin/tsn-metadata-proxy
+LOG_FILE=/tmp/cni-inspect.log
+
+exec 3>&1 # make stdout available as fd 3 for the result
+exec &>> $LOG_FILE
+
+logAll() {
+  echo "CNI call for ${CNI_COMMAND} on ${CNI_CONTAINERID}
+  - CNI_COMMAND: ${CNI_COMMAND}
+  - CNI_CONTAINERID: ${CNI_CONTAINERID}
+  - CNI_NETNS: ${CNI_NETNS}
+  - CNI_IFNAME: ${CNI_IFNAME}
+  - CNI_ARGS: ${CNI_ARGS}
+  - CNI_PATH: ${CNI_PATH}
+  - STDIN: ${STDIN}\n"
+}
+
+config_tsn() {
+  # Init variables
+  FIRST_INTERFACE=$(echo "$STDIN" | ${BIN_DIR}/jq -r '.prevResult.interfaces[0]')
+  VETH_HOST=$(echo "$FIRST_INTERFACE" | ${BIN_DIR}/jq -r '.name')
+  TSN_INGRESS_OR_EGRESS=$(echo "$STDIN" | ${BIN_DIR}/jq -r '.tsnIngressOrEgress')
+  TSN_IFNAME=$(echo "$STDIN" | ${BIN_DIR}/jq -r '.tsnIfname')
+
+  # Loading BPF programs.
+  if [ ! -f /sys/fs/bpf/tracking ]; then
+    ${BIN_DIR}/bpftool prog load ${BIN_DIR}/tracking.bpf.o /sys/fs/bpf/tracking autoattach
+  fi
+
+  if [ ! -f /sys/fs/bpf/restorer ]; then
+    ${BIN_DIR}/bpftool prog load ${BIN_DIR}/restorer.bpf.o /sys/fs/bpf/restorer
+  fi
+  
+  # Attach set metadata BPF program to the interface if it is not present
+  BPF_ID=$(${BIN_DIR}/bpftool prog show | grep restore_metadata | awk '{print $1}' | sed 's/:$//' | tail -n 1)
+  if [ -n "$TSN_IFNAME" ] && [ -n "$TSN_INGRESS_OR_EGRESS" ]; then
+    if ! /opt/cni/bin/tsn-metadata-proxy/bpftool net | grep -q 'eth0.*egress'; then
+      ${BIN_DIR}/bpftool net attach tcx_$TSN_INGRESS_OR_EGRESS id $BPF_ID dev $TSN_IFNAME
+    else
+      echo "BPF prog already appears on the interface."
+    fi
+  else
+    ${BIN_DIR}/bpftool net attach tcx_ingress id $BPF_ID dev $VETH_HOST
+  fi
+
+  # Setting up BPF program on a pod.
+  # This part of the code checks if the netns was created in '/var/run/netns/' folder or not.
+  # Kind creates the netns in the '/var/run/netns/' folder.
+  # Minikube creates its netns in the '/run/docker/netns/' folder.
+  NETNS_PATH="/var/run/netns"
+  if [[ "$CNI_NETNS" == *"$NETNS_PATH"* ]]; then
+    echo "CNI_NETNS contains $NETNS_PATH"
+    NETNS=$(basename ${CNI_NETNS})
+  else
+    echo "CNI_NETNS does not contain $NETNS_PATH"
+    PID=$(echo "$CNI_NETNS" | awk -F'/' '{print $3}')
+    NSFS=$(lsns -t net --noheadings | grep $PID | awk '{print $7}')
+    NETNS=$(basename ${NSFS})
+    mkdir -p $NETNS_PATH
+    ln -s /run/docker/netns/${NETNS} ${NETNS_PATH}/${NETNS}
+  fi
+  
+  if [ ! -f /sys/fs/bpf/saver ]; then
+    ${BIN_DIR}/bpftool prog load ${BIN_DIR}/saver.bpf.o /sys/fs/bpf/saver
+  fi
+  BPF_ID=$(${BIN_DIR}/bpftool prog show | grep save_metadata | awk '{print $1}' | sed 's/:$//' | tail -n 1)
+  ip netns exec ${NETNS} ${BIN_DIR}/bpftool net attach tcx_egress id ${BPF_ID} dev ${CNI_IFNAME}
+
+  if [ ! -f /sys/fs/bpf/garbage_collector ]; then
+    ${BIN_DIR}/bpftool prog load ${BIN_DIR}/garbage_collector.bpf.o /sys/fs/bpf/garbage_collector
+  fi
+  ${BIN_DIR}/bpftool prog run name garbage_collector data_in /opt/cni/bin/tsn
+}
+
+
+logAll
+case $CNI_COMMAND in
+ADD)
+	config_tsn
+  echo $(echo "$STDIN" | ${BIN_DIR}/jq -r '.prevResult') >&3
+  exit 0
+;;
+
+DEL)
+	echo "DEL"
+  exit 0
+;;
+
+GET)
+	echo "GET not supported"
+	exit 1
+;;
+
+VERSION)
+  echo '{
+    "cniVersion": "0.3.1", 
+    "supportedVersions": [ "0.3.0", "0.3.1", "0.4.0", "1.0.0" ] 
+  }' >&3
+;;
+
+*)
+  echo "Unknown cni command: $CNI_COMMAND" 
+  exit 1
+;;
+
+esac

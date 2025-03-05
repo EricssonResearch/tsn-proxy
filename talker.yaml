@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: talker # If you're running multiple pods, you will need to change the pod's name.
+spec:
+  containers:
+  - name: main-container
+    image: alpine/socat
+    command: ["/bin/sh", "-c", "sleep infinity"] # Keep the container running.
+    securityContext:
+      privileged: true # Add capabilities required for BPF.
+    volumeMounts:
+    - name: bpf-fs
+      mountPath: /sys/fs/bpf
+  #nodeSelector:
+  #  kubernetes.io/hostname: demo-control-plane # Specifies which nodes the pod should run on. Modify this if you want the pod to run on different nodes.
+  volumes:
+  - name: bpf-fs
+    hostPath:
+      path: /sys/fs/bpf
+      type: DirectoryOrCreate
